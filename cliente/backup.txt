@@ -1,0 +1,352 @@
+import javax.sound.sampled.*;
+import java.util.*;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.io.*;
+import java.net.*;
+
+class UDP__Client {
+    private static final int PORT = 9000;
+    private static final int BUFFER_SIZE = 1024 + 8; // 1024 bytes + 8 bytes para o número do pacote
+    private static final String SERVER_ADDRESS = "localhost";
+    private static final int TIMEOUT = 3000; // 2 segundos
+
+    public static void hehe(String[] args) {
+        DatagramSocket socket = null;
+        PriorityQueue<Packet> packetQueue = new PriorityQueue<>(Comparator.comparingInt(Packet::getPacketNumber));
+        Set<Integer> missingPackets = new HashSet<>();
+        int position = 0;
+        boolean receiving = true;
+
+        try {
+            socket = new DatagramSocket();
+            InetAddress serverAddress = InetAddress.getByName(SERVER_ADDRESS);
+
+            byte[] buffer = new byte[BUFFER_SIZE];
+
+            AudioFormat format = new AudioFormat(44100, 16, 2, true, false);
+            SourceDataLine line = AudioSystem.getSourceDataLine(format);
+            line.open(format);
+            line.start();
+
+            // Ajustar o volume para 10%
+            FloatControl volumeControl = (FloatControl) line.getControl(FloatControl.Type.MASTER_GAIN);
+            float volume = (float) (Math.log(0.1) / Math.log(10.0) * 20.0);
+            volumeControl.setValue(volume);
+
+            long lastRequestTime = System.currentTimeMillis();
+
+            while (receiving) {
+                if (System.currentTimeMillis() - lastRequestTime > TIMEOUT) {
+                    missingPackets.add(position);
+                    lastRequestTime = System.currentTimeMillis();
+                }
+
+                // Solicitar pacotes ausentes
+                for (int missing : missingPackets) {
+                    System.out.println("Solicitando novamente o pacote: " + missing);
+                    String request = "REQUEST:" + missing;
+                    byte[] requestBytes = request.getBytes();
+                    DatagramPacket requestPacket = new DatagramPacket(requestBytes, requestBytes.length, serverAddress,
+                            PORT);
+                    socket.send(requestPacket);
+                }
+
+                // Solicitar o próximo pacote
+                if (!missingPackets.contains(position)) {
+                    String request = "REQUEST:" + position;
+                    byte[] requestBytes = request.getBytes();
+                    DatagramPacket requestPacket = new DatagramPacket(requestBytes, requestBytes.length, serverAddress,
+                            PORT);
+                    socket.send(requestPacket);
+                }
+
+                socket.setSoTimeout(TIMEOUT);
+                DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+                try {
+                    socket.receive(packet);
+                    byte[] packetData = packet.getData();
+                    int packetNumber = Integer.parseInt(new String(Arrays.copyOfRange(packetData, 0, 8)));
+                    byte[] data = Arrays.copyOfRange(packetData, 8, packet.getLength());
+
+                    if (packetNumber == position) {
+                        line.write(data, 0, data.length);
+                        position++;
+                        missingPackets.remove(packetNumber);
+                    } else {
+                        packetQueue.add(new Packet(packetNumber, data));
+                    }
+
+                    while (!packetQueue.isEmpty() && packetQueue.peek().getPacketNumber() == position) {
+                        Packet pkt = packetQueue.poll();
+                        line.write(pkt.getData(), 0, pkt.getData().length);
+                        position++;
+                        missingPackets.remove(pkt.getPacketNumber());
+                    }
+                } catch (IOException e) {
+                    // Re-solicitar pacotes se ocorrer um timeout
+                    System.out.println("Timeout ocorrido. Re-solicitando pacotes...");
+                    continue;
+                }
+
+                if (packet.getLength() < BUFFER_SIZE) {
+                    receiving = false; // Último pacote recebido
+                }
+            }
+
+            line.drain();
+            line.close();
+
+            System.out.println("Arquivo recebido com sucesso");
+        } catch (IOException | LineUnavailableException e) {
+            e.printStackTrace();
+        } finally {
+            if (socket != null) {
+                socket.close();
+            }
+        }
+    }
+}
+
+class Packet {
+    private int packetNumber;
+    private byte[] data;
+
+    public Packet(int packetNumber, byte[] data) {
+        this.packetNumber = packetNumber;
+        this.data = data;
+    }
+
+    public int getPacketNumber() {
+        return packetNumber;
+    }
+
+    public byte[] getData() {
+        return data;
+    }
+}
+
+class UDPClient {
+    private String serverName;
+    private int port;
+    private DatagramSocket clientSocket;
+    private InetAddress IPAddress;
+    private int bufferSize;
+    private int timeout;
+
+    public UDPClient(String serverName, int port, int bufferSize, int timeout) throws Exception {
+        this.serverName = serverName;
+        this.port = port;
+        this.IPAddress = InetAddress.getByName(this.serverName);
+        this.bufferSize = bufferSize;
+        this.timeout = timeout;
+    }
+
+    public void connect() throws Exception {
+        clientSocket = new DatagramSocket();
+        System.out.println("UDP client socket created.");
+    }
+
+    public void sendMessage(String message) throws IOException {
+        byte[] sendData = message.getBytes();
+        DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length, IPAddress, port);
+        clientSocket.send(sendPacket);
+    }
+
+    public Packet receiveMessage() throws IOException {
+        byte[] receiveData = new byte[bufferSize];
+        clientSocket.setSoTimeout(timeout*3);
+        DatagramPacket receivePacket = new DatagramPacket(receiveData, receiveData.length);
+
+        try {
+            clientSocket.receive(receivePacket);
+            byte[] packetData = receivePacket.getData();
+            int packetNumber = Integer.parseInt(new String(Arrays.copyOfRange(packetData, 0, 8)));
+            byte[] data = Arrays.copyOfRange(packetData, 8, receivePacket.getLength());
+            return new Packet(packetNumber, data);
+        } catch (Exception e) {
+            e.printStackTrace();
+            System.exit(1);
+        }
+
+        return null;
+    }
+
+    public void close() {
+        clientSocket.close();
+        System.out.println("UDP client socket closed.");
+    }
+}
+
+class TCPClient {
+    private String serverName;
+    private int port;
+    private Socket clientSocket;
+    private DataOutputStream outToServer;
+    private BufferedReader inFromServer;
+
+    public TCPClient(String serverName, int port) {
+        this.serverName = serverName;
+        this.port = port;
+    }
+
+    public void connect() throws IOException {
+        clientSocket = new Socket(serverName, port);
+        outToServer = new DataOutputStream(clientSocket.getOutputStream());
+        inFromServer = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
+        System.out.println("Connected to server.");
+    }
+
+    public void sendMessage(String message) throws IOException {
+        outToServer.writeBytes(message + '\n');
+    }
+
+    public String receiveMessage() throws IOException {
+        StringBuilder stringBuilder = new StringBuilder();
+        String line;
+        while ((line = inFromServer.readLine()) != null)
+            stringBuilder.append(line).append("\n");
+        return stringBuilder.toString();
+    }
+
+    public void close() throws IOException {
+        inFromServer.close();
+        outToServer.close();
+        clientSocket.close();
+        System.out.println("Connection closed.");
+    }
+}
+
+class MusicClient {
+    private static final String SERVER_ADDRESS = "localhost";
+    private static final int BUFFER_SIZE = 1024;
+    private static final int TCP_PORT = 5050;
+    private static final int UDP_PORT = 5051;
+    private static final int TIMEOUT = 1000;
+
+    private TCPClient tcpClient;
+    private UDPClient udpClient;
+
+    PriorityQueue<Packet> packetQueue = new PriorityQueue<>(Comparator.comparingInt(Packet::getPacketNumber));
+    Set<Integer> missingPackets = new HashSet<>();
+
+    SourceDataLine line;
+
+    volatile boolean ended;
+    private String musicName;
+    private boolean canPlay;
+    private int packets;
+
+    public MusicClient() throws Exception {
+        this.tcpClient = new TCPClient(SERVER_ADDRESS, TCP_PORT);
+        this.udpClient = new UDPClient(SERVER_ADDRESS, UDP_PORT, BUFFER_SIZE + 8, TIMEOUT);
+        this.canPlay = false;
+        this.musicName = "";
+        this.packets = 0;
+        this.ended = false;
+    }
+
+    public void start() throws Exception {
+        tcpClient.connect();
+        udpClient.connect();
+
+        AudioFormat format = new AudioFormat(44100, 16, 2, true, false);
+        line = AudioSystem.getSourceDataLine(format);
+        line.open(format);
+    }
+
+    public void chooseMusic() throws Exception {
+        String musicName = System.console().readLine("Music name: ");
+        tcpClient.sendMessage(musicName);
+
+        String[] serverResponse = tcpClient.receiveMessage().split("\n");
+        String response = serverResponse[0].split(": ")[1];
+
+        if (response.equals("music ready")) {
+            this.musicName = musicName;
+            canPlay = true;
+            // size = Integer.parseInt(serverResponse[1].split(": ")[1]);
+            packets = Integer.parseInt(serverResponse[2].split(": ")[1]);
+        }
+    }
+
+    public void changeVolume(double volume) {
+        FloatControl volumeControl = (FloatControl) line.getControl(FloatControl.Type.MASTER_GAIN);
+        float vol = (float) (Math.log(volume) / Math.log(10.0) * 20.0);
+        volumeControl.setValue(vol);
+    }
+
+    public void playMusic() throws Exception {
+        if (!canPlay) {
+            System.out.println("Please, insert a valid music");
+            return;
+        }
+
+        System.console().readLine("Press start to play");
+
+        line.start();
+        int position = 0;
+        boolean receiving = true;
+
+        while (receiving) {
+            // Solicitar pacotes ausentes
+            for (int missing : missingPackets) {
+                udpClient.sendMessage(musicName + ":" + missing);
+            }
+
+            // Solicitar o próximo pacote
+            if (!missingPackets.contains(position)) {
+                udpClient.sendMessage(musicName + ":" + position);
+            }
+
+            try {
+                Packet packet = udpClient.receiveMessage();
+                int packetNumber = packet.getPacketNumber();
+                byte[] data = packet.getData();
+
+                if (packetNumber == position) {
+                    line.write(data, 0, data.length);
+                    position++;
+                    missingPackets.remove(packetNumber);
+                } else {
+                    packetQueue.add(new Packet(packetNumber, data));
+                }
+
+                while (!packetQueue.isEmpty() && packetQueue.peek().getPacketNumber() == position) {
+                    Packet pkt = packetQueue.poll();
+                    line.write(pkt.getData(), 0, pkt.getData().length);
+                    position++;
+                    missingPackets.remove(pkt.getPacketNumber());
+                }
+            } catch (IOException e) {
+                // System.out.println("Timeout ocorrido. Re-solicitando pacotes...");
+                continue;
+            }
+
+            if (position == packets) {
+                receiving = false; // Último pacote recebido
+            }
+        }
+
+        line.drain();
+        line.close();
+    }
+
+    public void close() throws Exception {
+        tcpClient.close();
+    }
+}
+
+
+public class Client {
+    public static void main(String[] args) throws Exception {
+        MusicClient client = new MusicClient();
+        client.start();
+        client.changeVolume(0.1);
+        client.chooseMusic();
+        client.playMusic();
+        while(true){}
+        // client.close();
+    }
+}
